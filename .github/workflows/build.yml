@@ -2,6 +2,8 @@ name: Build and Push Minecraft Image to ECR
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -32,36 +34,47 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # 4. Build Docker image
+      # 4. Ensure ECR repo exists (prevents silent failures)
+      - name: Create ECR repository if missing
+        run: |
+          aws ecr describe-repositories --repository-names $ECR_REPOSITORY || \
+          aws ecr create-repository --repository-name $ECR_REPOSITORY
+
+      # 5. Set image tag (safe fallback)
+      - name: Define image tag
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "IMAGE_TAG=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+          else
+            echo "IMAGE_TAG=latest" >> $GITHUB_ENV
+          fi
+
+      # 6. Build Docker image
       - name: Build Docker image
         run: |
-          docker build -t $ECR_REPOSITORY:${{ github.ref_name }} .
+          docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
 
-      # 5. Smoke test (required by rubric)
+      # 7. Smoke test container
       - name: Smoke test container
         run: |
-          docker run -d --name test -p 25565:25565 $ECR_REPOSITORY:${{ github.ref_name }}
+          docker run -d --name test -p 25565:25565 $ECR_REPOSITORY:$IMAGE_TAG
           sleep 30
-
           docker logs test || true
-
           docker stop test
 
-      # 6. Tag and push to ECR (IMPORTANT FIX)
+      # 8. Tag and push to ECR
       - name: Tag and push image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          IMAGE=${{ github.ref_name }}
+          # Always ensure latest exists
+          docker tag $ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-          # Tag versioned image
-          docker tag $ECR_REPOSITORY:$IMAGE \
-            $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE
+          # If this is a version tag, also push that
+          docker tag $ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
-          # ALSO tag as latest (THIS FIXES YOUR ANSIBLE ERROR)
-          docker tag $ECR_REPOSITORY:$IMAGE \
-            $ECR_REGISTRY/$ECR_REPOSITORY:latest
-
-          # Push both tags
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          if [[ "$IMAGE_TAG" != "latest" ]]; then
+            docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          fi
